@@ -28,6 +28,107 @@ class TestYFinance(unittest.TestCase):
         )
 
 
+    @patch('app.stocks.libraries.yfinance.requests.get')
+    def test_get_ticker_company_name_fallback(self, mock_get):
+        """
+        Regression test for issue #500 (Ticker not found for CUSIP 'G2616T119'
+        / Company 'D BORAL ACQUISITION I CORP').
+
+        Demonstrates the offline root cause: a CUSIP that Yahoo's CUSIP index
+        does not resolve made get_ticker return None (and the resolver file a
+        'Ticker not found' issue) even though the same free provider (Yahoo
+        search) has the security under its company name.
+
+        Fixtures are verbatim from live Yahoo Finance search API responses
+        captured on 2026-10-19 for this CUSIP/company.
+        """
+        payloads = {
+            "G2616T119": {"quotes": []},  # CUSIP index miss (observed transiently)
+            "D BORAL ACQUISITION I CORP": {"quotes": [
+                {'exchange': 'NGM', 'quoteType': 'EQUITY', 'symbol': 'DBCA',
+                 'index': 'quotes', 'score': 20018.0, 'typeDisp': 'Equity',
+                 'longname': 'D. Boral Acquisition I Corp.', 'exchDisp': 'NASDAQ',
+                 'sector': 'Financial Services', 'industry': 'Shell Companies',
+                 'isYahooFinance': True},
+            ]},
+        }
+
+        def side_effect(url, headers=None, **_):
+            response = MagicMock()
+            response.raise_for_status.return_value = None
+            for query, payload in payloads.items():
+                if query in url:
+                    response.json.return_value = payload
+                    return response
+            response.json.return_value = {'quotes': []}
+            return response
+
+        mock_get.side_effect = side_effect
+
+        ticker = YFinance.get_ticker('G2616T119', company_name='D BORAL ACQUISITION I CORP')
+        self.assertEqual(ticker, 'DBCA')
+
+        # The CUSIP query is always attempted first, with the same URL/headers
+        first_call = mock_get.call_args_list[0]
+        self.assertIn('G2616T119', first_call.args[0])
+        self.assertEqual(first_call.kwargs.get('headers'), {'User-Agent': 'Mozilla/5.0'})
+
+
+    @patch('app.stocks.libraries.yfinance.requests.get')
+    def test_get_ticker_cusip_result_wins(self, mock_get):
+        """
+        The direct CUSIP result keeps priority: when the CUSIP index resolves,
+        it is returned instead of a company-name search result (the company
+        search would return the plain common ticker, not the warrant class).
+        """
+        payloads = {
+            "G2616T119": {"quotes": [
+                {'exchange': 'NGM', 'quoteType': 'EQUITY', 'symbol': 'DBCAW',
+                 'index': 'quotes', 'score': 20002.0, 'typeDisp': 'Equity',
+                 'longname': 'D. Boral Acquisition I Corp.', 'exchDisp': 'NASDAQ',
+                 'isYahooFinance': True},
+            ]},
+            "D BORAL ACQUISITION I CORP": {"quotes": [{'symbol': 'DBCA'}]},
+        }
+
+        def side_effect(url, headers=None, **_):
+            response = MagicMock()
+            response.raise_for_status.return_value = None
+            for query, payload in payloads.items():
+                if query in url:
+                    response.json.return_value = payload
+                    return response
+            response.json.return_value = {'quotes': []}
+            return response
+
+        mock_get.side_effect = side_effect
+
+        ticker = YFinance.get_ticker('G2616T119', company_name='D BORAL ACQUISITION I CORP')
+        self.assertEqual(ticker, 'DBCAW')
+
+        # The company-name search must not even be attempted in this case
+        for call in mock_get.call_args_list:
+            self.assertNotIn('D+BORAL', call.args[0].replace(' ', '+'))
+
+
+    @patch('app.stocks.libraries.yfinance.requests.get')
+    def test_get_ticker_no_company_name_unchanged(self, mock_get):
+        """
+        Without a company name, a missing CUSIP still returns None (no behavior
+        change for callers that cannot supply one).
+        """
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {'quotes': []}
+        mock_get.return_value = mock_response
+
+        self.assertIsNone(YFinance.get_ticker('G2616T119'))
+        mock_get.assert_called_once_with(
+            "https://query1.finance.yahoo.com/v1/finance/search?q=G2616T119",
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+
+
     @patch('app.stocks.libraries.yfinance.yf.Ticker')
     @patch('app.stocks.libraries.yfinance.YFinance.get_ticker')
     def test_get_company(self, mock_get_ticker, mock_yf_ticker):
