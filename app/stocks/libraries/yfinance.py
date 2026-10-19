@@ -58,17 +58,18 @@ class YFinance(FinanceLibrary):
 
 
     @staticmethod
-    def get_ticker(cusip: str, **kwargs) -> str | None:
+    def _search_yahoo(query: str) -> str | None:
         """
-        Searches for a ticker for a given CUSIP by querying the Yahoo Finance search API.
+        Searches for a quoted symbol on the Yahoo Finance search API.
+        Returns the first quote's symbol, or None when no quotes are returned.
 
         Args:
-            cusip (str): The CUSIP of the stock.
+            query (str): The search query (a CUSIP or a company name).
 
         Returns:
-            str | None: The ticker symbol if found, otherwise None.
+            str | None: The first quoted symbol if found, otherwise None.
         """
-        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={cusip}"
+        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={query}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
             response = requests.get(url, headers=headers)
@@ -77,11 +78,44 @@ class YFinance(FinanceLibrary):
 
             quotes = data.get('quotes', [])
             for quote in quotes:
-                return quote['symbol']
-            print(f"🚨 YFinance: No ticker found for CUSIP {cusip}.")
+                if quote.get('symbol'):
+                    return quote['symbol']
         except (requests.RequestException, ValueError) as e:
-            print(f"❌ ERROR: Failed to get ticker for CUSIP {cusip} using YFinance: {e}")
+            print(f"❌ ERROR: Failed to get ticker for query '{query}' using YFinance: {e}")
             return None
+        return None
+
+
+    @staticmethod
+    def get_ticker(cusip: str, **kwargs) -> str | None:
+        """
+        Searches for a ticker for a given CUSIP by querying the Yahoo Finance search API.
+
+        When the CUSIP query returns no quotes, falls back to a company-name search on
+        the same API (mirrors the Finnhub fallback, see `Finnhub.get_ticker`), because
+        Yahoo may index the security under its company name even when its CUSIP index
+        misses that CUSIP (e.g. newly assigned 'G'-prefixed identifiers).
+
+        Args:
+            cusip (str): The CUSIP of the stock.
+
+        Returns:
+            str | None: The ticker symbol if found, otherwise None.
+        """
+        ticker = YFinance._search_yahoo(cusip)
+        if ticker:
+            return ticker
+
+        print(f"🚨 YFinance: No ticker found for CUSIP {cusip}.")
+
+        company_name = kwargs.get('company_name')
+        if company_name:
+            ticker = YFinance._search_yahoo(company_name)
+            if ticker:
+                return ticker
+            print(f"🚨 YFinance: No ticker found for CUSIP {cusip} / Company '{company_name}'.")
+
+        return None
 
 
     @staticmethod
